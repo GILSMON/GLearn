@@ -1,0 +1,37 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Claude-inspired theme ── */
+:root {
+  --bg:      #F7F6F3;   /* warm off-white — Claude's chat background */
+  --card:    #FFFFFF;
+  --text:    #1A1918;   /* warm near-black */
+  --subtext: #6B6660;   /* warm medium gray */
+  --border:  #E8E2D9;   /* warm light gray */
+}
+
+.dark {
+  --bg:      #1C1917;   /* Claude's dark bg — very dark warm brown */
+  --card:    #262220;   /* slightly lighter surface */
+  --text:    #EDE8DE;   /* warm off-white */
+  --subtext: #9E9890;   /* warm muted gray */
+  --border:  #38332E;   /* dark warm border */
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.card-body {
+  transition: all 0.2s ease;
+}
