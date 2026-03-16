@@ -1,13 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash2, X } from 'lucide-react'
 import API from '../api/client'
 import DomainCard from '../components/DomainCard'
 
 export default function Dashboard() {
-  const [domains, setDomains] = useState([])
-  const [stats, setStats] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const queryClient = useQueryClient()
   const [showNewDomain, setShowNewDomain] = useState(false)
   const [newDomain, setNewDomain] = useState({ name: '', icon: '', color: '#3B82F6' })
   const [selectMode, setSelectMode] = useState(false)
@@ -15,19 +14,22 @@ export default function Dashboard() {
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const navigate = useNavigate()
 
-  useEffect(() => {
-    Promise.all([API.get('/domains'), API.get('/stats')]).then(([dRes, sRes]) => {
-      setDomains(dRes.data)
-      setStats(sRes.data)
-      setLoading(false)
-    })
-  }, [])
+  const { data: domains = [], isLoading: domainsLoading } = useQuery({
+    queryKey: ['domains'],
+    queryFn: () => API.get('/domains').then(r => r.data),
+  })
+  const { data: stats, isLoading: statsLoading } = useQuery({
+    queryKey: ['stats'],
+    queryFn: () => API.get('/stats').then(r => r.data),
+  })
+  const loading = domainsLoading || statsLoading
 
   async function handleCreateDomain(e) {
     e.preventDefault()
     if (!newDomain.name.trim()) return
-    const res = await API.post('/domains', newDomain)
-    setDomains(prev => [...prev, res.data])
+    await API.post('/domains', newDomain)
+    queryClient.invalidateQueries({ queryKey: ['domains'] })
+    queryClient.invalidateQueries({ queryKey: ['stats'] })
     setNewDomain({ name: '', icon: '', color: '#3B82F6' })
     setShowNewDomain(false)
   }
@@ -49,7 +51,8 @@ export default function Dashboard() {
 
   async function handleBulkDelete() {
     await Promise.all([...selectedIds].map(id => API.delete(`/domains/${id}`)))
-    setDomains(prev => prev.filter(d => !selectedIds.has(d.id)))
+    queryClient.invalidateQueries({ queryKey: ['domains'] })
+    queryClient.invalidateQueries({ queryKey: ['stats'] })
     exitSelectMode()
   }
 

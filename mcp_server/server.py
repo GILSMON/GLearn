@@ -1,11 +1,12 @@
 """
-server.py — GilsLearn MCP server.
+server.py — GLearn Remote MCP server (Streamable HTTP transport).
 
-This is what Claude Desktop connects to. It exposes 7 tools that let you
-add cards, notes, and projects to GilsLearn just by talking to Claude.
+This is what Claude Desktop connects to over HTTPS. It exposes 7 tools
+that let you add cards, notes, and projects to GLearn just by talking
+to Claude.
 
-Transport: stdio (Claude Desktop spawns this as a subprocess and communicates
-           via stdin/stdout — no port needed).
+Transport: Streamable HTTP (runs as an HTTP server behind Nginx + SSL).
+           Claude Desktop connects via: https://gleam-gil.duckdns.org/mcp
 
 Tools:
   1. add_card       — add a qa/concept/code_snippet card
@@ -17,254 +18,162 @@ Tools:
   7. list_cards     — list cards for a domain > topic
 """
 
-import json
-import asyncio
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp import types
+import os
+from typing import Optional
+
+import uvicorn
+from mcp.server.fastmcp import FastMCP
 
 import api_client
-import app_manager
 
-# Create the MCP server instance with a name Claude will display
-server = Server("gilslearn")
+# ─── FastMCP instance ────────────────────────────────────────────────────────
+# stateless_http=True  → no session state between requests (safe for load balancing)
+# json_response=True   → return JSON instead of SSE (simpler for Claude Desktop)
+
+mcp = FastMCP("gleam", stateless_http=True, json_response=True)
 
 
-# ─── Tool Definitions ─────────────────────────────────────────────────────────
-# Each @server.list_tools call registers what tools exist and their input schema.
-# Each @server.call_tool call handles actually running the tool.
+# ─── Tool Definitions ────────────────────────────────────────────────────────
+# FastMCP auto-generates JSON schemas from Python type hints — no manual
+# inputSchema dicts needed.
 
-@server.list_tools()
-async def list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="add_card",
-            description=(
-                "Add a study card to GilsLearn. Specify the domain, topic, and card type. "
-                "Types: 'qa' (question + answer), 'concept' (title + explanation), "
-                "'code_snippet' (title + code + explanation). "
-                "Domain and topic are auto-created if they don't exist."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "domain":      {"type": "string", "description": "Domain name, e.g. 'FastAPI'"},
-                    "topic":       {"type": "string", "description": "Topic name, e.g. 'Routing'"},
-                    "card_type":   {"type": "string", "enum": ["qa", "concept", "code_snippet"]},
-                    "question":    {"type": "string", "description": "For qa cards: the question"},
-                    "answer":      {"type": "string", "description": "For qa cards: the answer"},
-                    "code_example":{"type": "string", "description": "For qa cards: optional code example"},
-                    "title":       {"type": "string", "description": "For concept/code_snippet cards"},
-                    "explanation": {"type": "string", "description": "For concept/code_snippet cards"},
-                    "code":        {"type": "string", "description": "For code_snippet cards: the code"},
-                    "tags":        {"type": "array", "items": {"type": "string"}, "description": "List of tags"},
-                    "difficulty":  {"type": "string", "enum": ["easy", "medium", "hard"], "default": "medium"},
-                },
-                "required": ["domain", "topic", "card_type"],
-            },
-        ),
-        types.Tool(
-            name="add_note",
-            description="Add a free-form text note to a topic in GilsLearn.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "domain":  {"type": "string"},
-                    "topic":   {"type": "string"},
-                    "content": {"type": "string", "description": "The note text"},
-                },
-                "required": ["domain", "topic", "content"],
-            },
-        ),
-        types.Tool(
-            name="mark_done",
-            description="Mark a study card as done by its ID.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "card_id": {"type": "integer", "description": "The card's numeric ID"},
-                },
-                "required": ["card_id"],
-            },
-        ),
-        types.Tool(
-            name="add_project",
-            description="Add a portfolio project to GilsLearn with tech stack and resume bullets.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name":           {"type": "string"},
-                    "description":    {"type": "string"},
-                    "tech_stack":     {"type": "array", "items": {"type": "string"}},
-                    "resume_bullets": {"type": "array", "items": {"type": "string"}},
-                    "github_url":     {"type": "string"},
-                },
-                "required": ["name"],
-            },
-        ),
-        types.Tool(
-            name="get_summary",
-            description="Get your current study progress: total cards, done count, and per-domain breakdown.",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="search_cards",
-            description="Search all study cards by keyword. Returns matching cards with their content.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search keyword"},
-                },
-                "required": ["query"],
-            },
-        ),
-        types.Tool(
-            name="list_cards",
-            description="List all study cards for a specific domain and topic.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "domain":    {"type": "string"},
-                    "topic":     {"type": "string"},
-                    "show_done": {"type": "boolean", "default": True, "description": "Include done cards?"},
-                },
-                "required": ["domain", "topic"],
-            },
-        ),
-        types.Tool(
-            name="start_app",
-            description="Start the GilsLearn backend (port 8005) and frontend (port 5176).",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="stop_app",
-            description="Stop the GilsLearn backend and frontend servers.",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="app_status",
-            description="Check whether the GilsLearn backend and frontend are currently running.",
-            inputSchema={"type": "object", "properties": {}},
-        ),
+@mcp.tool()
+def add_card(
+    domain: str,
+    topic: str,
+    card_type: str,
+    question: str = "",
+    answer: str = "",
+    code_example: str = "",
+    title: str = "",
+    explanation: str = "",
+    code: str = "",
+    tags: Optional[list[str]] = None,
+    difficulty: str = "medium",
+) -> str:
+    """Add a study card to GLearn. Types: 'qa', 'concept', 'code_snippet'."""
+    result = api_client.add_card(
+        domain=domain,
+        topic=topic,
+        card_type=card_type,
+        question=question,
+        answer=answer,
+        title=title,
+        explanation=explanation,
+        code=code,
+        code_example=code_example,
+        tags=tags or [],
+        difficulty=difficulty,
+    )
+    return (
+        f"Card added to {domain} > {topic}.\n"
+        f"ID: {result['id']} | Type: {result['content']['type']} | Done: {result['done']}"
+    )
+
+
+@mcp.tool()
+def add_note(domain: str, topic: str, content: str) -> str:
+    """Add a free-form text note to a topic in GLearn."""
+    result = api_client.add_note(domain=domain, topic=topic, content=content)
+    return f"Note added to {domain} > {topic}. ID: {result['id']}"
+
+
+@mcp.tool()
+def mark_done(card_id: int) -> str:
+    """Mark a study card as done by its ID."""
+    result = api_client.mark_done(card_id=card_id)
+    return f"Card {result['id']} marked as done."
+
+
+@mcp.tool()
+def add_project(
+    name: str,
+    description: str = "",
+    tech_stack: Optional[list[str]] = None,
+    resume_bullets: Optional[list[str]] = None,
+    github_url: str = "",
+) -> str:
+    """Add a portfolio project to GLearn with tech stack and resume bullets."""
+    result = api_client.add_project(
+        name=name,
+        description=description,
+        tech_stack=tech_stack or [],
+        resume_bullets=resume_bullets or [],
+        github_url=github_url,
+    )
+    return f"Project '{result['name']}' added. ID: {result['id']}"
+
+
+@mcp.tool()
+def get_summary() -> str:
+    """Get your current study progress: total cards, done count, and per-domain breakdown."""
+    result = api_client.get_summary()
+    lines = [
+        f"Total cards: {result['total_cards']}",
+        f"Done: {result['done_count']} ({result['percent_done']}%)",
+        "",
+        "By domain:",
     ]
+    for d in result["by_domain"]:
+        pct = round(d["done_count"] / d["card_count"] * 100) if d["card_count"] > 0 else 0
+        lines.append(f"  {d['domain_name']}: {d['done_count']}/{d['card_count']} ({pct}%)")
+    return "\n".join(lines)
 
 
-# ─── Tool Execution ───────────────────────────────────────────────────────────
+@mcp.tool()
+def search_cards(query: str) -> str:
+    """Search all study cards by keyword. Returns matching cards with their content."""
+    results = api_client.search_cards(query=query)
+    if not results:
+        return f"No cards found for '{query}'."
+    lines = [f"Found {len(results)} card(s) for '{query}':\n"]
+    for card in results:
+        c = card["content"]
+        label = c.get("question") or c.get("title", "untitled")
+        lines.append(f"  [{card['id']}] ({c['type']}) {label} — done={card['done']}")
+    return "\n".join(lines)
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    """
-    Router — receives the tool name + arguments from Claude,
-    calls the right api_client function, returns the result as text.
-    """
-    try:
-        if name == "add_card":
-            result = api_client.add_card(
-                domain=arguments["domain"],
-                topic=arguments["topic"],
-                card_type=arguments["card_type"],
-                question=arguments.get("question", ""),
-                answer=arguments.get("answer", ""),
-                title=arguments.get("title", ""),
-                explanation=arguments.get("explanation", ""),
-                code=arguments.get("code", ""),
-                code_example=arguments.get("code_example", ""),
-                tags=arguments.get("tags", []),
-                difficulty=arguments.get("difficulty", "medium"),
-            )
-            text = (
-                f"Card added to {arguments['domain']} > {arguments['topic']}.\n"
-                f"ID: {result['id']} | Type: {result['content']['type']} | Done: {result['done']}"
-            )
 
-        elif name == "add_note":
-            result = api_client.add_note(
-                domain=arguments["domain"],
-                topic=arguments["topic"],
-                content=arguments["content"],
-            )
-            text = f"Note added to {arguments['domain']} > {arguments['topic']}. ID: {result['id']}"
+@mcp.tool()
+def list_cards(domain: str, topic: str, show_done: bool = True) -> str:
+    """List all study cards for a specific domain and topic."""
+    results = api_client.list_cards(domain=domain, topic=topic, show_done=show_done)
+    if not results:
+        return f"No cards in {domain} > {topic}."
+    lines = [f"{len(results)} card(s) in {domain} > {topic}:\n"]
+    for card in results:
+        c = card["content"]
+        label = c.get("question") or c.get("title", "untitled")
+        done_mark = "\u2713" if card["done"] else "\u25cb"
+        lines.append(f"  {done_mark} [{card['id']}] ({c['type']}) {label}")
+    return "\n".join(lines)
 
-        elif name == "mark_done":
-            result = api_client.mark_done(card_id=arguments["card_id"])
-            text = f"Card {result['id']} marked as done."
 
-        elif name == "add_project":
-            result = api_client.add_project(
-                name=arguments["name"],
-                description=arguments.get("description", ""),
-                tech_stack=arguments.get("tech_stack", []),
-                resume_bullets=arguments.get("resume_bullets", []),
-                github_url=arguments.get("github_url", ""),
-            )
-            text = f"Project '{result['name']}' added. ID: {result['id']}"
+# ─── ASGI Middleware ──────────────────────────────────────────────────────────
+# Nginx forwards requests with Host: gleam-gil.duckdns.org, but Starlette's
+# TrustedHostMiddleware rejects anything that isn't localhost. This middleware
+# rewrites the Host header so Starlette is happy.
 
-        elif name == "get_summary":
-            result = api_client.get_summary()
-            lines = [
-                f"Total cards: {result['total_cards']}",
-                f"Done: {result['done_count']} ({result['percent_done']}%)",
-                "",
-                "By domain:",
-            ]
-            for d in result["by_domain"]:
-                pct = round(d["done_count"] / d["card_count"] * 100) if d["card_count"] > 0 else 0
-                lines.append(f"  {d['domain_name']}: {d['done_count']}/{d['card_count']} ({pct}%)")
-            text = "\n".join(lines)
+class RewriteHostMiddleware:
+    def __init__(self, app):
+        self.app = app
 
-        elif name == "search_cards":
-            results = api_client.search_cards(query=arguments["query"])
-            if not results:
-                text = f"No cards found for '{arguments['query']}'."
-            else:
-                lines = [f"Found {len(results)} card(s) for '{arguments['query']}':\n"]
-                for card in results:
-                    c = card["content"]
-                    label = c.get("question") or c.get("title", "untitled")
-                    lines.append(f"  [{card['id']}] ({c['type']}) {label} — done={card['done']}")
-                text = "\n".join(lines)
-
-        elif name == "list_cards":
-            results = api_client.list_cards(
-                domain=arguments["domain"],
-                topic=arguments["topic"],
-                show_done=arguments.get("show_done", True),
-            )
-            if not results:
-                text = f"No cards in {arguments['domain']} > {arguments['topic']}."
-            else:
-                lines = [f"{len(results)} card(s) in {arguments['domain']} > {arguments['topic']}:\n"]
-                for card in results:
-                    c = card["content"]
-                    label = c.get("question") or c.get("title", "untitled")
-                    done_mark = "✓" if card["done"] else "○"
-                    lines.append(f"  {done_mark} [{card['id']}] ({c['type']}) {label}")
-                text = "\n".join(lines)
-
-        elif name == "start_app":
-            text = await asyncio.to_thread(app_manager.start_app)
-
-        elif name == "stop_app":
-            text = await asyncio.to_thread(app_manager.stop_app)
-
-        elif name == "app_status":
-            text = await asyncio.to_thread(app_manager.app_status)
-
-        else:
-            text = f"Unknown tool: {name}"
-
-    except Exception as e:
-        text = f"Error running tool '{name}': {str(e)}"
-
-    return [types.TextContent(type="text", text=text)]
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            new_headers = []
+            for key, value in scope["headers"]:
+                if key == b"host":
+                    new_headers.append((key, b"localhost:8081"))
+                else:
+                    new_headers.append((key, value))
+            scope = dict(scope, headers=new_headers)
+        await self.app(scope, receive, send)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
-
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.getenv("MCP_PORT", "8081"))
+    mcp_app = mcp.streamable_http_app()
+    app = RewriteHostMiddleware(mcp_app)
+    uvicorn.run(app, host="0.0.0.0", port=port)

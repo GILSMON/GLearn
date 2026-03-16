@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import API from '../api/client'
 import ProjectCard from '../components/ProjectCard'
 
@@ -7,19 +8,16 @@ import ProjectCard from '../components/ProjectCard'
  * URL: /projects
  */
 export default function Projects() {
-  const [projects, setProjects] = useState([])
-  const [loading, setLoading] = useState(true)
+  const queryClient = useQueryClient()
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({
     name: '', description: '', tech_stack: '', github: '', resume_bullets: '',
   })
 
-  useEffect(() => {
-    API.get('/projects').then(res => {
-      setProjects(res.data)
-      setLoading(false)
-    })
-  }, [])
+  const { data: projects = [], isLoading: loading } = useQuery({
+    queryKey: ['projects'],
+    queryFn: () => API.get('/projects').then(r => r.data),
+  })
 
   async function handleCreate(e) {
     e.preventDefault()
@@ -30,8 +28,8 @@ export default function Projects() {
       links: form.github ? { github: form.github } : null,
       resume_bullets: form.resume_bullets.split('\n').map(b => b.trim()).filter(Boolean),
     }
-    const res = await API.post('/projects', payload)
-    setProjects(prev => [res.data, ...prev])
+    await API.post('/projects', payload)
+    queryClient.invalidateQueries({ queryKey: ['projects'] })
     setForm({ name: '', description: '', tech_stack: '', github: '', resume_bullets: '' })
     setShowForm(false)
   }

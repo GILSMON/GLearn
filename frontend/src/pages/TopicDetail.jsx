@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash2, X, ChevronLeft, Plus, FileText, CheckCircle2, Circle, Menu, Minus } from 'lucide-react'
 import API from '../api/client'
 import ArticleView from '../components/ArticleView'
@@ -7,10 +8,8 @@ import ArticleView from '../components/ArticleView'
 export default function TopicDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
-  const [cards, setCards] = useState([])
-  const [notes, setNotes] = useState([])
-  const [loading, setLoading] = useState(true)
   const [activeCardId, setActiveCardId] = useState(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [fontSize, setFontSize] = useState(() => {
@@ -28,21 +27,22 @@ export default function TopicDetail() {
     tags: '', difficulty: 'medium',
   })
 
+  const { data: cards = [], isLoading: cardsLoading } = useQuery({
+    queryKey: ['cards', id],
+    queryFn: () => API.get(`/cards?topic_id=${id}`).then(r => r.data),
+  })
+  const { data: notes = [], isLoading: notesLoading } = useQuery({
+    queryKey: ['notes', id],
+    queryFn: () => API.get(`/notes?topic_id=${id}`).then(r => r.data),
+  })
+  const loading = cardsLoading || notesLoading
+
+  // Set the first card as active when cards load
   useEffect(() => {
-    async function load() {
-      const [cRes, nRes] = await Promise.all([
-        API.get(`/cards?topic_id=${id}`),
-        API.get(`/notes?topic_id=${id}`),
-      ])
-      setCards(cRes.data)
-      setNotes(nRes.data)
-      if (cRes.data.length > 0) {
-        setActiveCardId(cRes.data[0].id)
-      }
-      setLoading(false)
+    if (cards.length > 0 && activeCardId === null) {
+      setActiveCardId(cards[0].id)
     }
-    load()
-  }, [id])
+  }, [cards, activeCardId])
 
   function adjustFontSize(delta) {
     setFontSize(prev => {
@@ -53,11 +53,18 @@ export default function TopicDetail() {
   }
 
   function handleToggleDone(cardId, newDone) {
-    setCards(prev => prev.map(c => c.id === cardId ? { ...c, done: newDone } : c))
+    queryClient.setQueryData(['cards', id], prev =>
+      prev?.map(c => c.id === cardId ? { ...c, done: newDone } : c)
+    )
+    queryClient.invalidateQueries({ queryKey: ['stats'] })
+    queryClient.invalidateQueries({ queryKey: ['topics'] })
+    queryClient.invalidateQueries({ queryKey: ['domains'] })
   }
 
   function handleCardUpdate(cardId, updatedCard) {
-    setCards(prev => prev.map(c => c.id === cardId ? updatedCard : c))
+    queryClient.setQueryData(['cards', id], prev =>
+      prev?.map(c => c.id === cardId ? updatedCard : c)
+    )
   }
 
   const activeIndex = cards.findIndex(c => c.id === activeCardId)
@@ -81,7 +88,9 @@ export default function TopicDetail() {
       content = { ...content, title: cardForm.title, code: cardForm.code, explanation: cardForm.explanation }
     }
     const res = await API.post('/cards', { topic_id: parseInt(id), content })
-    setCards(prev => [res.data, ...prev])
+    queryClient.invalidateQueries({ queryKey: ['cards', id] })
+    queryClient.invalidateQueries({ queryKey: ['stats'] })
+    queryClient.invalidateQueries({ queryKey: ['topics'] })
     setActiveCardId(res.data.id)
     setCardForm({ type: 'qa', question: '', answer: '', code_example: '', title: '', explanation: '', code: '', tags: '', difficulty: 'medium' })
     setShowCardForm(false)
@@ -89,27 +98,27 @@ export default function TopicDetail() {
 
   async function handleDeleteCard(cardId) {
     await API.delete(`/cards/${cardId}`)
-    setCards(prev => {
-      const next = prev.filter(c => c.id !== cardId)
-      if (activeCardId === cardId) {
-        setActiveCardId(next.length > 0 ? next[0].id : null)
-      }
-      return next
-    })
+    const remaining = cards.filter(c => c.id !== cardId)
+    if (activeCardId === cardId) {
+      setActiveCardId(remaining.length > 0 ? remaining[0].id : null)
+    }
+    queryClient.invalidateQueries({ queryKey: ['cards', id] })
+    queryClient.invalidateQueries({ queryKey: ['stats'] })
+    queryClient.invalidateQueries({ queryKey: ['topics'] })
   }
 
   async function handleAddNote(e) {
     e.preventDefault()
     if (!noteText.trim()) return
-    const res = await API.post('/notes', { topic_id: parseInt(id), content: noteText.trim() })
-    setNotes(prev => [...prev, res.data])
+    await API.post('/notes', { topic_id: parseInt(id), content: noteText.trim() })
+    queryClient.invalidateQueries({ queryKey: ['notes', id] })
     setNoteText('')
     setShowNoteForm(false)
   }
 
   async function handleDeleteNote(noteId) {
     await API.delete(`/notes/${noteId}`)
-    setNotes(prev => prev.filter(n => n.id !== noteId))
+    queryClient.invalidateQueries({ queryKey: ['notes', id] })
   }
 
   const inputClass = "w-full px-3 py-2 rounded-lg text-sm border focus:outline-none focus:ring-2 focus:ring-brand-300"

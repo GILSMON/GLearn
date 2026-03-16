@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash2, ChevronLeft, FolderInput, X, Check } from 'lucide-react'
 import API from '../api/client'
 import ProgressBar from '../components/ProgressBar'
@@ -16,10 +17,7 @@ import ProgressBar from '../components/ProgressBar'
 export default function DomainDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const [domain, setDomain] = useState(null)
-  const [allDomains, setAllDomains] = useState([])
-  const [topics, setTopics] = useState([])
-  const [loading, setLoading] = useState(true)
+  const queryClient = useQueryClient()
   const [newTopicName, setNewTopicName] = useState('')
   const [showNewTopic, setShowNewTopic] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
@@ -29,24 +27,22 @@ export default function DomainDetail() {
   const [showMoveModal, setShowMoveModal] = useState(false)
   const [moving, setMoving] = useState(false)
 
-  useEffect(() => {
-    async function load() {
-      const [dRes, tRes] = await Promise.all([
-        API.get('/domains'),
-        API.get(`/topics?domain_id=${id}`),
-      ])
-      const found = dRes.data.find(d => d.id === parseInt(id))
-      setDomain(found)
-      setAllDomains(dRes.data)
-      setTopics(tRes.data)
-      setLoading(false)
-    }
-    load()
-  }, [id])
+  const { data: allDomains = [], isLoading: domainsLoading } = useQuery({
+    queryKey: ['domains'],
+    queryFn: () => API.get('/domains').then(r => r.data),
+  })
+  const { data: topics = [], isLoading: topicsLoading } = useQuery({
+    queryKey: ['topics', id],
+    queryFn: () => API.get(`/topics?domain_id=${id}`).then(r => r.data),
+  })
+  const loading = domainsLoading || topicsLoading
+  const domain = allDomains.find(d => d.id === parseInt(id)) || null
 
   async function handleDeleteTopic(topicId) {
     await API.delete(`/topics/${topicId}`)
-    setTopics(prev => prev.filter(t => t.id !== topicId))
+    queryClient.invalidateQueries({ queryKey: ['topics', id] })
+    queryClient.invalidateQueries({ queryKey: ['domains'] })
+    queryClient.invalidateQueries({ queryKey: ['stats'] })
     setSelectedIds(prev => { const next = new Set(prev); next.delete(topicId); return next })
     setConfirmDeleteId(null)
   }
@@ -54,8 +50,8 @@ export default function DomainDetail() {
   async function handleAddTopic(e) {
     e.preventDefault()
     if (!newTopicName.trim()) return
-    const res = await API.post('/topics', { domain_id: parseInt(id), name: newTopicName.trim() })
-    setTopics(prev => [...prev, res.data])
+    await API.post('/topics', { domain_id: parseInt(id), name: newTopicName.trim() })
+    queryClient.invalidateQueries({ queryKey: ['topics', id] })
     setNewTopicName('')
     setShowNewTopic(false)
   }
@@ -84,8 +80,8 @@ export default function DomainDetail() {
         topic_ids: [...selectedIds],
         target_domain_id: targetDomainId,
       })
-      // Remove moved topics from local state
-      setTopics(prev => prev.filter(t => !selectedIds.has(t.id)))
+      queryClient.invalidateQueries({ queryKey: ['topics'] })
+      queryClient.invalidateQueries({ queryKey: ['domains'] })
       clearSelection()
     } finally {
       setMoving(false)

@@ -14,5 +14,4 @@ RUN uv sync --frozen --no-dev
 # Copy application code
 COPY . .
 
-# Cloud Run injects PORT env var (default 8080)
-CMD ["sh", "-c", ".venv/bin/uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD [".venv/bin/python", "server.py"]

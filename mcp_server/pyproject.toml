@@ -1,9 +1,11 @@
 [project]
-name = "mcp-server"
+name = "gleam-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "GLearn Remote MCP Server — Streamable HTTP"
 requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28.1",
     "mcp>=1.26.0",
+    "uvicorn>=0.41.0",
+    "starlette>=0.45.0",
 ]

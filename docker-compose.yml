@@ -1,0 +1,20 @@
+services:
+  backend:
+    image: 387941095285.dkr.ecr.us-east-2.amazonaws.com/gleam-backend:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - PORT=8080
+    restart: unless-stopped
+
+  mcp:
+    image: 387941095285.dkr.ecr.us-east-2.amazonaws.com/gleam-mcp:latest
+    ports:
+      - "8081:8081"
+    environment:
+      - API_BASE_URL=http://backend:8080
+      - MCP_PORT=8081
+    restart: unless-stopped
+    depends_on:
+      - backend
